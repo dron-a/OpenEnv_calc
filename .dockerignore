@@ -1,0 +1,8 @@
+my_env.py
+my_env1.py
+test_run.py
+main.py
+uv.lock
+venv
+.python-version
+__pycache__/
