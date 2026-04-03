@@ -15,8 +15,11 @@ class BudgetEnvironment(Environment):
     # ------------------------------
     # RESET
     # ------------------------------
-    def reset(self) -> BudgetObservation:
+    def reset(self, realism_mode: str | None = None) -> BudgetObservation:
         s = self._state
+        # Update realism_mode if provided
+        if realism_mode is not None:
+            s.realism_mode = realism_mode
 
         # Reset core state
         s.step_count = 0
@@ -111,7 +114,7 @@ class BudgetEnvironment(Environment):
             s.step_count >= s.max_steps
             or s.remaining_budget <= 0.0
         )
-
+        
         return BudgetObservation(
             step=s.step_count,
             remaining_budget=s.remaining_budget,
@@ -123,10 +126,22 @@ class BudgetEnvironment(Environment):
     # ------------------------------
     # STATE (for API)
     # ------------------------------
-    @property
-    def state(self) -> BudgetState:
-        return self._state.model_dump()
+    # @property
+    # def state(self) -> BudgetState:
+    #     return self._state.model_dump()
 
+    @property
+    def state(self) -> dict:
+        s = self._state
+        return {
+            "step_count": s.step_count,
+            "remaining_budget": s.remaining_budget,
+            "campaign_performance": s.conversion_rates.copy(),
+            "reward_buffer": list(s.reward_buffer),  # now JSON-serializable
+            "total_conversions": s.total_conversions,
+            "total_spend": s.total_spend,
+            "done": s.step_count >= s.max_steps or s.remaining_budget <= 0.0,
+        }
     # ------------------------------
     # MAX SCORE (for grading)
     # ------------------------------
