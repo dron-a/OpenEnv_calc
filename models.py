@@ -13,7 +13,7 @@ class BudgetObservation(Observation):
     """Observation returned to the agent at each step"""
     step: int = Field(default=0, description="Current timestep in the episode")
     remaining_budget: float = Field(default=0.0, description="Remaining budget for the episode")
-    campaign_performance: list[float] = Field(default_factory=list, description="Conversion rate per campaign")
+    campaign_performance: list[float] = Field(default=list, description="Conversion rate per campaign")
 
     reward: float = Field(default=0.0)
     done: bool = Field(default=False)
@@ -29,7 +29,7 @@ class BudgetState(State):
     """
     step_count: int = Field(default=0, description="Internal step counter")
     remaining_budget: float = Field(default=0.0, description="Remaining budget")
-    conversion_rates: list[float] = Field(default_factory=list, description="Conversion rates per campaign")
+    conversion_rates: list[float] = Field(default=list, description="Conversion rates per campaign")
     reward_buffer: deque = Field(default_factory=lambda: deque(maxlen=1), description="Buffer for delayed reward")
     max_steps: int = Field(default=30, description="Max steps per episode")
     total_budget: float = Field(default=1000.0, description="Total budget for the episode")
@@ -38,7 +38,7 @@ class BudgetState(State):
     penalty_beta: float = Field(default=2.0, description="Exponent for spend penalty")
     total_conversions: float = Field(default=0.0, description="Total conversions over episode")
     total_spend: float = Field(default=0.0, description="Total budget spent")
-    spend_history: list[float] = Field(default_factory=list, description="Spend per step")
+    spend_history: list[float] = Field(default=list, description="Spend per step")
 
     # --- Constructor for realism mode and seed ---
     def __init__(self, realism_mode="fixed", seed=42, **data):

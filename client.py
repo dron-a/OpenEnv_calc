@@ -1,21 +1,21 @@
 from typing import Any, Dict
 from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
-from models import CalcAction, CalcObservation, CalcState
+from models import BudgetAction, BudgetObservation, BudgetState
 
-class CalcEnv(EnvClient[CalcAction, CalcObservation, CalcState]):
+class BudgetEnvironment(EnvClient[BudgetAction, BudgetObservation, BudgetState]):
     """
     Client for the OpenEnv_calc environment.
     """
 
-    def _step_payload(self, action: CalcAction) -> Dict[str, Any]:
+    def _step_payload(self, action: BudgetAction) -> Dict[str, Any]:
         """Convert an Action object to the JSON data expected by the env server."""
         return action.model_dump()
 
-    def _parse_result(self, payload: Dict[str, Any]) -> StepResult[CalcObservation]:
+    def _parse_result(self, payload: Dict[str, Any]) -> StepResult[BudgetObservation]:
         """Convert a JSON response from the env server to StepResult."""
         obs_data = payload.get("observation", {})
-        obs = CalcObservation.model_validate(obs_data)
+        obs = BudgetObservation.model_validate(obs_data)
         
         return StepResult(
             observation=obs,
@@ -23,9 +23,9 @@ class CalcEnv(EnvClient[CalcAction, CalcObservation, CalcState]):
             done=payload.get("done", False)
         )
 
-    def _parse_state(self, payload: Dict[str, Any]) -> CalcState:
+    def _parse_state(self, payload: Dict[str, Any]) -> BudgetState:
         """Convert a JSON response from the state endpoint to a State object."""
-        return CalcState.model_validate(payload)
+        return BudgetState.model_validate(payload)
 
 
 
