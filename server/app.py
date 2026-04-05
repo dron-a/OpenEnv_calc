@@ -1,7 +1,7 @@
 # server/app.py
 from openenv.core.env_server import create_fastapi_app, create_app
 from models import BudgetAction, BudgetObservation
-from server.environment import BudgetEnvironment
+from tasks.task1_budget import BudgetEnvironment
 # env = CalcEnvironment()
 # app = create_fastapi_app(env, CalcAction, CalcObservation)
 _global_env_instance = BudgetEnvironment()
