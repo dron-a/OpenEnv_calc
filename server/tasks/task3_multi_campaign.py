@@ -1,45 +1,65 @@
-# server/auction_environment.py
+# server/multi_campaign_environment.py
 
 import numpy as np
 from openenv.core.env_server import Environment
-from models import AuctionAction, AuctionObservation, AuctionState
+from models import AdPlatformAction, AdPlatformObservation, AdPlatformState
 
+# ---------------- RESET ----------------
+def reset(state: AdPlatformState) -> AdPlatformObservation:
+    s = state
 
-class AuctionEnvironment(Environment):
-    state_type = AuctionState
+    s.step_count = 0
+    s.remaining_budget = s.total_budget
+    s.total_conversions = 0.0
+    s.total_spend = 0.0
+    s.reward_buffer.clear()
 
-    def __init__(self):
-        super().__init__()
-        self._state = AuctionState()
+    s.prev_agent_bids = [0.0] * len(s.base_conversion_rates)
+    s.competitor_bids = s.base_competitor_bids.copy()
 
-    # ---------------- RESET ----------------
-    def reset(self) -> AuctionObservation:
-        s = self._state
-        s.step_count = 0
-        s.remaining_budget = s.total_budget
-        s.total_conversions = 0.0
-        s.total_spend = 0.0
-        s.reward_buffer.clear()
+    # Seeded market events
+    s.market_events = {
+        10: [1.2, 1.0, 0.8],
+        20: [0.9, 1.3, 1.0]
+    }
 
-        s.prev_agent_bids = [0.0] * len(s.conversion_rates)
-        s.competitor_bids = s.base_competitor_bids.copy()
+    # Initialize conversion rates
+    s.conversion_rates = s.base_conversion_rates.copy()
 
-        return AuctionObservation(
-            step=s.step_count,
-            remaining_budget=s.remaining_budget,
-            campaign_performance=s.conversion_rates
-        )
+    return AdPlatformObservation(
+        step=s.step_count,
+        remaining_budget=s.remaining_budget,
+        campaign_performance=s.conversion_rates
+    )
 
-    # ---------------- STEP ----------------
-    # ---------------- STEP ----------------
-def step(self, action: AuctionAction) -> AuctionObservation:
-    s = self._state
+# ---------------- STEP ----------------
+def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservation:
+    s = state
 
     allocations = action.allocations
     bids = action.bids
 
-    assert len(bids) == len(s.conversion_rates), "Bid length mismatch"
-    assert len(allocations) == len(s.conversion_rates), "Allocation length mismatch"
+    assert len(bids) == len(s.base_conversion_rates), "Bid length mismatch"
+    assert len(allocations) == len(s.base_conversion_rates), "Allocation length mismatch"
+
+    # ----------------------------
+    # UPDATE CONVERSION RATES
+    # ----------------------------
+    updated_rates = []
+    for i, base in enumerate(s.base_conversion_rates):
+        # Seasonality
+        seasonal = 1 + s.seasonal_amplitude * np.sin(
+            2 * np.pi * (s.step_count + i + s.seed) / s.seasonal_period
+        )
+        # Market events
+        event_multiplier = s.market_events.get(s.step_count, [1.0]*len(s.base_conversion_rates))[i]
+        # Seeded noise
+        rng = np.random.default_rng(s.seed + s.step_count + i)
+        noise = rng.uniform(-0.02, 0.02)
+
+        updated_rates.append(base * seasonal * event_multiplier * (1 + noise))
+
+    s.conversion_rates = updated_rates
 
     # ----------------------------
     # Generate competitor bids (adaptive + seeded variation)
@@ -47,7 +67,7 @@ def step(self, action: AuctionAction) -> AuctionObservation:
     new_competitor_bids = []
     for i, base_bid in enumerate(s.base_competitor_bids):
         rng = np.random.default_rng(s.seed + s.step_count + i)
-        # ±10% variation of base
+        # ±10% variation
         variation = rng.uniform(-0.1, 0.1)
         noisy_base = base_bid * (1 + variation)
         # Adaptive response to previous agent bid
@@ -79,30 +99,26 @@ def step(self, action: AuctionAction) -> AuctionObservation:
     # ----------------------------
     # Clamp allocations
     # ----------------------------
-    allocation = [max(0.0, min(a, pacing_limit)) for a in allocations]
+    allocations = [max(0.0, min(a, pacing_limit)) for a in allocations]
 
     # ----------------------------
     # Budget spend
     # ----------------------------
-    spend = sum(allocation)
+    spend = sum(allocations)
     spend = min(spend, s.remaining_budget)
-
-    # Store total available BEFORE spend (important for ratio)
     total_available = s.remaining_budget
-
     s.remaining_budget -= spend
     s.total_spend += spend
 
-    # --- Spend ratio (for carryover penalty) ---
-    if total_available > 0:
-        spend_ratio = spend / (total_available + 1e-8)
-    else:
-        spend_ratio = 0.0
+    spend_ratio = spend / (total_available + 1e-8) if total_available > 0 else 0.0
 
-    # --- Conversions (smooth win probability) ---
+    # ----------------------------
+    # Conversions (adaptive + market + seasonality + smooth win probability)
+    # ----------------------------
     conversions = 0.0
-    for a, bid, cb, cr in zip(allocation, bids, s.competitor_bids, s.conversion_rates):
-        win_prob = 1 / (1 + np.exp(cb - bid))  # sigmoid
+    for a, bid, cb, cr in zip(allocations, bids, s.competitor_bids, s.conversion_rates):
+        # Win probability via sigmoid
+        win_prob = 1 / (1 + np.exp(cb - bid))
         conversions += a * cr * win_prob
     s.total_conversions += conversions
 
@@ -116,22 +132,23 @@ def step(self, action: AuctionAction) -> AuctionObservation:
         delayed_reward = 0.0
 
     # ----------------------------
-    # Spend penalty (legitimate)
+    # Spend penalty
     # ----------------------------
     frac = spend / (s.total_budget + 1e-8)
-    penalty = s.penalty_alpha * (frac ** s.penalty_beta)
+    spend_penalty = s.penalty_alpha * (frac ** s.penalty_beta)
 
     # ----------------------------
-    # Carryover penalty (early aggressive spending)
+    # Carryover penalty
     # ----------------------------
+    carryover_penalty = 0.0
     if s.step_count < s.max_steps - 1:
-        time_factor = s.step_count / s.max_steps  # increases over time
+        time_factor = s.step_count / s.max_steps
         carryover_penalty = 0.2 * (spend_ratio ** 2) * (1 - time_factor)
 
     # ----------------------------
     # Total reward
     # ----------------------------
-    reward = delayed_reward - penalty - illegal_penalty - carryover_penalty
+    reward = delayed_reward - spend_penalty - illegal_penalty - carryover_penalty
 
     # ----------------------------
     # Step bookkeeping
@@ -140,29 +157,10 @@ def step(self, action: AuctionAction) -> AuctionObservation:
     s.step_count += 1
     done = s.step_count >= s.max_steps or s.remaining_budget <= 0.0
 
-    return AuctionObservation(
+    return AdPlatformObservation(
         step=s.step_count,
         remaining_budget=s.remaining_budget,
         campaign_performance=s.conversion_rates,
         reward=reward,
         done=done
     )
-
-    # ---------------- STATE ----------------
-    @property
-    def state(self):
-        s = self._state
-        return {
-            "step_count": s.step_count,
-            "remaining_budget": s.remaining_budget,
-            "competitor_bids": s.competitor_bids,
-            "total_conversions": s.total_conversions,
-            "total_spend": s.total_spend,
-            "done": s.step_count >= s.max_steps or s.remaining_budget <= 0.0
-        }
-
-    # ---------------- MAX SCORE ----------------
-    @property
-    def max_possible_conversions(self):
-        s = self._state
-        return s.total_budget * max(s.conversion_rates)

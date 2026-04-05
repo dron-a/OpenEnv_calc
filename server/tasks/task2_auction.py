@@ -2,38 +2,30 @@
 
 import numpy as np
 from openenv.core.env_server import Environment
-from models import AuctionAction, AuctionObservation, AuctionState
+from models import AdPlatformAction, AdPlatformObservation, AdPlatformState
 
 
-class AuctionEnvironment(Environment):
-    state_type = AuctionState
+# ---------------- RESET Function ----------------
+def reset(state: AdPlatformState) -> AdPlatformObservation:
+    s = state
+    s.step_count = 0
+    s.remaining_budget = s.total_budget
+    s.total_conversions = 0.0
+    s.total_spend = 0.0
+    s.reward_buffer.clear()
 
-    def __init__(self):
-        super().__init__()
-        self._state = AuctionState()
+    s.prev_agent_bids = [0.0] * len(s.conversion_rates)
+    s.competitor_bids = s.base_competitor_bids.copy()
 
-    # ---------------- RESET ----------------
-    def reset(self) -> AuctionObservation:
-        s = self._state
-        s.step_count = 0
-        s.remaining_budget = s.total_budget
-        s.total_conversions = 0.0
-        s.total_spend = 0.0
-        s.reward_buffer.clear()
+    return AdPlatformObservation(
+        step=s.step_count,
+        remaining_budget=s.remaining_budget,
+        campaign_performance=s.conversion_rates
+    )
 
-        s.prev_agent_bids = [0.0] * len(s.conversion_rates)
-        s.competitor_bids = s.base_competitor_bids.copy()
-
-        return AuctionObservation(
-            step=s.step_count,
-            remaining_budget=s.remaining_budget,
-            campaign_performance=s.conversion_rates
-        )
-
-    # ---------------- STEP ----------------
-    # ---------------- STEP ----------------
-def step(self, action: AuctionAction) -> AuctionObservation:
-    s = self._state
+# ---------------- STEP ----------------
+def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservation:
+    s = state
 
     allocations = action.allocations
     bids = action.bids
@@ -79,12 +71,12 @@ def step(self, action: AuctionAction) -> AuctionObservation:
     # ----------------------------
     # Clamp allocations
     # ----------------------------
-    allocation = [max(0.0, min(a, pacing_limit)) for a in allocations]
+    allocations = [max(0.0, min(a, pacing_limit)) for a in allocations]
 
     # ----------------------------
     # Budget spend
     # ----------------------------
-    spend = sum(allocation)
+    spend = sum(allocations)
     spend = min(spend, s.remaining_budget)
 
     # Store total available BEFORE spend (important for ratio)
@@ -101,7 +93,7 @@ def step(self, action: AuctionAction) -> AuctionObservation:
 
     # --- Conversions (smooth win probability) ---
     conversions = 0.0
-    for a, bid, cb, cr in zip(allocation, bids, s.competitor_bids, s.conversion_rates):
+    for a, bid, cb, cr in zip(allocations, bids, s.competitor_bids, s.conversion_rates):
         win_prob = 1 / (1 + np.exp(cb - bid))  # sigmoid
         conversions += a * cr * win_prob
     s.total_conversions += conversions
@@ -140,29 +132,10 @@ def step(self, action: AuctionAction) -> AuctionObservation:
     s.step_count += 1
     done = s.step_count >= s.max_steps or s.remaining_budget <= 0.0
 
-    return AuctionObservation(
+    return AdPlatformObservation(
         step=s.step_count,
         remaining_budget=s.remaining_budget,
         campaign_performance=s.conversion_rates,
         reward=reward,
         done=done
     )
-
-    # ---------------- STATE ----------------
-    @property
-    def state(self):
-        s = self._state
-        return {
-            "step_count": s.step_count,
-            "remaining_budget": s.remaining_budget,
-            "competitor_bids": s.competitor_bids,
-            "total_conversions": s.total_conversions,
-            "total_spend": s.total_spend,
-            "done": s.step_count >= s.max_steps or s.remaining_budget <= 0.0
-        }
-
-    # ---------------- MAX SCORE ----------------
-    @property
-    def max_possible_conversions(self):
-        s = self._state
-        return s.total_budget * max(s.conversion_rates)
