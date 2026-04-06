@@ -119,6 +119,8 @@ def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservat
     if s.step_count < s.max_steps - 1:
         time_factor = s.step_count / s.max_steps  # increases over time
         carryover_penalty = 0.2 * (spend_ratio ** 2) * (1 - time_factor)
+    else:
+        carryover_penalty = 0.0  # last step: no carryover penalty
 
     # ----------------------------
     # Total reward
@@ -136,6 +138,7 @@ def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservat
         step=s.step_count,
         remaining_budget=s.remaining_budget,
         campaign_performance=s.conversion_rates,
+        competitor_bids=s.competitor_bids,
         reward=reward,
         done=done
     )

@@ -15,6 +15,9 @@ def reset(state: AdPlatformState, realism_mode: str | None = None) -> AdPlatform
     # Reset core state
     s.step_count = 0
     s.remaining_budget = s.total_budget
+    s.total_conversions = 0.0
+    s.total_spend = 0.0
+    s.spend_history.clear()
     s.reward_buffer.clear()
 
     np.random.seed(s.seed)
@@ -37,6 +40,7 @@ def reset(state: AdPlatformState, realism_mode: str | None = None) -> AdPlatform
         campaign_performance=s.conversion_rates
     )
 
+
 # ---------------- STEP ----------------
 def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservation:
     s = state
@@ -45,7 +49,7 @@ def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservat
 
     # Validate action length
     assert len(action.allocations) == len(s.conversion_rates), "allocations length mismatch"
-    
+
     # Determine pacing limit
     if s.step_count == s.max_steps - 1:
         # Last step → allow spending all remaining budget
@@ -100,10 +104,10 @@ def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservat
     s.step_count += 1
 
     done = (
-        s.step_count >= s.max_steps
-        or s.remaining_budget <= 0.0
+            s.step_count >= s.max_steps
+            or s.remaining_budget <= 0.0
     )
-    
+
     return AdPlatformObservation(
         step=s.step_count,
         remaining_budget=s.remaining_budget,

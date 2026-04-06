@@ -161,6 +161,7 @@ def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservat
         step=s.step_count,
         remaining_budget=s.remaining_budget,
         campaign_performance=s.conversion_rates,
+        competitor_bids=s.competitor_bids,
         reward=reward,
         done=done
     )

@@ -1,180 +1,162 @@
-# Calculator Target Sum Environment
+# Ad Platform Environment
 
-This project is a **Reinforcement Learning (RL) environment** built using the **OpenEnv** framework. It simulates a calculator-based target sum task where an agent must navigate an internal state to reach a specific goal.
-
-## 🎯 Environment Objective
-
-The agent's goal is to reach a sum **equal to or greater than 10**.
-
-* The target sum is **not** provided to the agent at the start.
-* The agent must use `step` and `state` calls to identify the current sum and determine the optimal sequence of actions.
-* The environment returns `done=true` once the target condition is met.
+A multi-task **Reinforcement Learning environment** built on the [OpenEnv](https://github.com/openenv) framework. It simulates a real-world digital advertising platform where an agent must allocate budgets, set bids, and maximize ad conversions across multiple campaigns.
 
 ---
 
-## 📁 Project Structure
+## Environment Overview
 
-Please focus on the following core files. Other files in the repository are related to development, debugging, or CI/CD and can be ignored.
+The agent interacts with an ad platform over a fixed-length episode (30 steps). At each step it allocates budget and sets bids across **3 campaigns**. The environment tracks spending, computes conversions based on win probability against adaptive competitors, and returns shaped rewards.
+
+Three tasks are available with increasing difficulty:
+
+| Task | Description | Difficulty |
+|---|---|---|
+| `budget` | Allocate a fixed budget across campaigns to maximize conversions. No bidding. | Easy |
+| `auction` | Compete against adaptive bidders. Must bid and allocate to win auctions. | Medium |
+| `multi_campaign` | Full complexity — dynamic conversion rates, market events, seasonality. | Hard |
+
+---
+
+## Project Structure
 
 ```text
 .
-├── models.py                # Pydantic schemas for Action, Observation, and State
-├── pyproject.toml           # Project metadata and dependencies
-├── .dockerignore            # Files to exclude from Docker build
-├── .gitignore               # Files to exclude from Git
+├── models.py                    # Pydantic schemas: Action, Observation, State
+├── grader.py                    # Independent evaluation scores for all 3 tasks
+├── inference.py                 # Baseline LLM agent inference script
+├── client.py                    # OpenEnv async client wrapper
+├── example_usage.py             # Example episode loop using the client
+├── pyproject.toml               # Project metadata
+├── openenv.yaml                 # OpenEnv spec configuration
+├── Dockerfile                   # Container definition
 └── server/
-    ├── app.py               # FastAPI server entry point and environment factory
-    ├── environment.py       # Core RL logic and CalculatorEnvironment class
-    └── requirements.txt     # Python dependencies for the server
+    ├── app.py                   # FastAPI entry point and session factory
+    ├── environment.py           # Unified AdPlatformEnvironment class
+    ├── requirements.txt         # Python dependencies
+    └── tasks/
+        ├── task1_budget.py      # Budget task logic
+        ├── task2_auction.py     # Auction task logic
+        └── task3_multi_campaign.py  # Multi-campaign task logic
 ```
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Build and Run
 
-After pulling or forking the master branch, use the following commands to containerize and launch the environment.
-
-**Build the image:**
-
 ```bash
-docker build -t calc:latest .
+docker build -t ad-platform:latest .
+docker run -it --rm -p 8000:8000 ad-platform:latest
 ```
 
-**Run the container:**
+The server starts on `http://localhost:8000`. Interactive API docs: `http://localhost:8000/docs`
+
+To select a task, set the `TASK` environment variable:
 
 ```bash
-docker run -it --rm -p 8000:8000 calc:latest
+docker run -it --rm -p 8000:8000 -e TASK=auction ad-platform:latest
 ```
 
 ---
 
-## 📘 API Documentation
+## API
 
-Once running, the interactive API documentation is available at: **`http://0.0.0.0:8000/docs`**
+### Reset (POST `/reset`)
 
----
+Start a new episode.
 
-## 🛠 Interaction Protocol
+```json
+{}
+```
 
-Every trial episode must follow this sequence:
+Response:
+```json
+{
+  "observation": {
+    "step": 0,
+    "remaining_budget": 1000.0,
+    "campaign_performance": [0.05, 0.03, 0.02],
+    "competitor_bids": [],
+    "reward": 0.0,
+    "done": false
+  },
+  "reward": null,
+  "done": false
+}
+```
 
-1. **Reset:** Call the `/reset` endpoint at the start of every new episode.
-2. **Loop:** Iteratively call `/step` and `/state` to navigate the environment.
-3. **Terminate:** Continue until the response returns `"done": true`.
+### Step (POST `/step`)
 
-### 1. Reset Environment (POST)
+Submit an action.
 
-Initializes a new episode.
+```json
+{
+  "action": {
+    "allocations": [100.0, 50.0, 30.0],
+    "bids": [0.6, 0.5, 0.4]
+  }
+}
+```
 
-* **URL:** `http://0.0.0.0:8000/reset`
-* **Example Body:**
+Response:
+```json
+{
+  "observation": {
+    "step": 1,
+    "remaining_budget": 820.0,
+    "campaign_performance": [0.05, 0.03, 0.02],
+    "competitor_bids": [0.51, 0.42, 0.31],
+    "reward": 3.21,
+    "done": false
+  },
+  "reward": 3.21,
+  "done": false
+}
+```
 
-    ```json
-    {
-      "episode_id": "episode-001",
-      "seed": 42
-    }
-    ```
+### State (GET `/state`)
 
-* **Example Response:**
-
-    ```json
-    {
-      "observation": { "current_value": 0 },
-      "reward": null,
-      "done": false
-    }
-    ```
-
-### 2. Take a Step (POST)
-
-Perform an action. You can use commands `"add"` or `"sub"` (subtract).
-
-* **URL:** `http://0.0.0.0:8000/step`
-* **Example Body:**
-
-    ```json
-    {
-      "action": {
-        "command": "add",
-        "amount": 20
-      }
-    }
-    ```
-
-* **Example Response:**
-
-    ```json
-    {
-      "observation": { "current_value": 20 },
-      "reward": 0.0,
-      "done": true
-    }
-    ```
-
-### 3. Get Internal State (GET)
-
-View the current internal state.
-
-* **URL:** `http://0.0.0.0:8000/state`
-* **Example Response:**
-
-    ```json
-    {
-      "episode_id": "episode-001",
-      "step_count": 1,
-      "current_sum": 20,
-    }
-    ```
+Inspect full internal state.
 
 ---
 
-## 🔍 Development Note
+## Reward Design
 
-Explore `models.py` to see how the Pydantic schemas define the structure of the API responses. The strict typing ensures that the `CalcAction`, `CalcObservation`, and `CalcState` models are consistently reflected across all endpoints.
+Each task uses a shaped reward:
 
----
+```
+reward = delayed_conversions - spend_penalty - illegal_action_penalty - carryover_penalty
+```
 
-## 🧩 Understanding the Code
-
-* The **API request/response schema** is defined in:
-
-  ```bash
-  models.py
-  ```
-
-* These schemas are directly reflected in the responses of `/reset`, `/step`, and `/state`.
-
-* Core logic of the RL environment is implemented in:
-
-  ```bash
-  server/environment.py
-  ```
-
-* API routing and server setup:
-
-  ```bash
-  server/app.py
-  ```
+- **delayed_conversions**: conversions from the previous step (1-step delay)
+- **spend_penalty**: penalizes spending too large a fraction of total budget in one step
+- **illegal_action_penalty**: penalizes negative or pacing-violating allocations
+- **carryover_penalty**: penalizes aggressive early spending (decreases as episode progresses)
 
 ---
 
-## 🎯 Summary
+## Grader
 
-* RL environment where agent must infer a hidden target ≥ 10
-* Interaction via `reset → state → step`
-* Simple arithmetic action space (`add`, `sub`)
-* Fully containerized using Docker
-* Schema-driven API design via `models.py`
+Independent evaluation functions in `grader.py` score episodes on a `[0, 1]` scale:
+
+```python
+from grader import compute_score, compute_auction_score, compute_multi_campaign_score
+
+# After an episode ends:
+score = compute_score(env._state)                      # budget task
+result = compute_auction_score(env._state)             # auction task
+result = compute_multi_campaign_score(env._state)      # multi_campaign task
+print(result["final_score"])
+```
 
 ---
 
-## 💡 Notes
+## Running the Baseline Agent
 
-* Designed for RL experimentation and evaluation
-* Can be extended with:
-  * More complex reward shaping
-  * Larger action space
-  * Multi-step reasoning policies
+```bash
+export API_KEY=your_hf_token
+export TASK_NAME=auction
+python inference.py
+```

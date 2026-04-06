@@ -1,10 +1,12 @@
 [project]
-name = "oe"
+name = "ad-platform-env"
 version = "0.1.0"
-description = "Add your description here"
+description = "Multi-task ad platform RL environment: budget optimization, auction bidding, and multi-campaign management"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "gymnasium>=1.2.3",
     "openenv-core>=0.2.2",
+    "numpy>=1.24.0",
+    "openai>=1.0.0",
 ]

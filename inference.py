@@ -12,42 +12,45 @@ Emits logs in the mandatory [START], [STEP], [END] format.
 """
 
 import asyncio
+import json
 import os
 import textwrap
 from typing import List, Optional
 
 from openai import OpenAI
 
-from server.multi_task_environment import MultiTaskEnvironment
-from models import BudgetAction, AuctionAction, DynamicAction
+from server.environment import AdPlatformEnvironment
+from models import AdPlatformAction
 
 # ---------------- CONFIG ----------------
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 TASK_NAME = os.getenv("TASK_NAME") or "budget"  # budget | auction | multi_campaign
-BENCHMARK = os.getenv("BENCHMARK") or "multi_task_env"
+BENCHMARK = os.getenv("BENCHMARK") or "ad_platform_env"
 IMAGE_NAME = os.getenv("IMAGE_NAME")  # for from_docker_image() if used
 
-MAX_STEPS = 10
+MAX_STEPS = 30
 TEMPERATURE = 0.7
 MAX_TOKENS = 150
-SUCCESS_SCORE_THRESHOLD = 0.1  # normalized score in [0,1]
+SUCCESS_SCORE_THRESHOLD = 0.5  # normalized score in [0,1]
 
 SYSTEM_PROMPT = textwrap.dedent(
     """
-    You are controlling a multi-task environment.
-    Depending on the task, you must return an action string that encodes:
-    - budget allocations for budget task
-    - bid amounts for auction task
-    - multi-campaign allocations/bids for multi_campaign task
+    You are controlling a multi-task ad platform environment.
+    Depending on the task, you must allocate budgets and set bids across 3 campaigns.
 
-    Respond with a valid JSON string or Python-like list representing the action(s):
-    - Budget: {"allocation": [0.0, 1.2, ...]}
-    - Auction: {"allocations": [...], "bids": [...]}
-    - Multi-campaign: {"allocations": [...], "bids": [...]}
+    Respond with a valid JSON object only — no commentary or extra text.
 
-    Only output the action object. No commentary or extra text.
+    Action format (all tasks):
+      {"allocations": [<float>, <float>, <float>], "bids": [<float>, <float>, <float>]}
+
+    Guidelines:
+    - allocations: budget to spend per campaign this step (non-negative floats)
+    - bids: bid price per campaign (required for auction/multi_campaign; use [0,0,0] for budget task)
+    - Stay within the remaining budget; do not overspend in early steps
+    - Prefer campaigns with higher conversion rates
+    - For auction/multi_campaign: bid above competitor bids to win auctions
     """
 ).strip()
 
@@ -69,12 +72,14 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 
 
 # ---------------- PROMPT ----------------
-def build_user_prompt(step: int, last_action: str, last_reward: float, history: List[str]) -> str:
+def build_user_prompt(step: int, obs: dict, last_reward: float, history: List[str]) -> str:
     history_block = "\n".join(history[-4:]) if history else "None"
     return textwrap.dedent(
         f"""
         Step: {step}
-        Last action: {last_action!r}
+        Remaining budget: {obs.get('remaining_budget', 'unknown')}
+        Campaign conversion rates: {obs.get('campaign_performance', [])}
+        Competitor bids: {obs.get('competitor_bids', [])}
         Last reward: {last_reward:.2f}
         Previous steps:
         {history_block}
@@ -83,8 +88,8 @@ def build_user_prompt(step: int, last_action: str, last_reward: float, history: 
     ).strip()
 
 
-def get_model_action(client: OpenAI, step: int, last_action: str, last_reward: float, history: List[str]) -> dict:
-    prompt = build_user_prompt(step, last_action, last_reward, history)
+def get_model_action(client: OpenAI, step: int, obs: dict, last_reward: float, history: List[str]) -> dict:
+    prompt = build_user_prompt(step, obs, last_reward, history)
     try:
         completion = client.chat.completions.create(
             model=MODEL_NAME,
@@ -97,9 +102,8 @@ def get_model_action(client: OpenAI, step: int, last_action: str, last_reward: f
             stream=False,
         )
         text = (completion.choices[0].message.content or "").strip()
-        # Evaluate safely into dict
         try:
-            action = eval(text, {"__builtins__": {}})
+            action = json.loads(text)
             if not isinstance(action, dict):
                 action = {}
         except Exception:
@@ -113,7 +117,11 @@ def get_model_action(client: OpenAI, step: int, last_action: str, last_reward: f
 # ---------------- MAIN LOOP ----------------
 async def main():
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-    env = await MultiTaskEnvironment(task=TASK_NAME).from_docker_image(IMAGE_NAME) if IMAGE_NAME else MultiTaskEnvironment(task=TASK_NAME)
+
+    if IMAGE_NAME:
+        env = await AdPlatformEnvironment.from_docker_image(IMAGE_NAME)
+    else:
+        env = AdPlatformEnvironment(task=TASK_NAME)
 
     history: List[str] = []
     rewards: List[float] = []
@@ -124,49 +132,53 @@ async def main():
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        result = await env.reset()
-        last_action = "{}"
+        result = env.reset()
         last_reward = 0.0
+        obs = result.model_dump() if hasattr(result, "model_dump") else {}
 
         for step in range(1, MAX_STEPS + 1):
             if getattr(result, "done", False):
                 break
 
-            action_dict = get_model_action(client, step, last_action, last_reward, history)
+            action_dict = get_model_action(client, step, obs, last_reward, history)
 
-            # Wrap in correct Action class
-            if TASK_NAME == "budget":
-                action_obj = BudgetAction(**action_dict)
-            elif TASK_NAME == "auction":
-                action_obj = AuctionAction(**action_dict)
-            elif TASK_NAME == "multi_campaign":
-                action_obj = DynamicAction(**action_dict)
-            else:
-                raise ValueError(f"Unknown task: {TASK_NAME}")
+            # Provide default bids for budget task if model omits them
+            if "allocations" not in action_dict:
+                action_dict["allocations"] = [0.0, 0.0, 0.0]
+            if "bids" not in action_dict:
+                action_dict["bids"] = []
 
-            result = await env.step(action_obj)
-            reward = getattr(result, "reward", 0.0)
+            try:
+                action_obj = AdPlatformAction(**action_dict)
+            except Exception as exc:
+                print(f"[DEBUG] Invalid action, using zeros: {exc}", flush=True)
+                action_obj = AdPlatformAction(allocations=[0.0, 0.0, 0.0], bids=[])
+
+            result = env.step(action_obj)
+            reward = getattr(result, "reward", 0.0) or 0.0
             done = getattr(result, "done", False)
+            obs = result.model_dump() if hasattr(result, "model_dump") else {}
+
             steps_taken = step
-            last_action = str(action_dict)
             last_reward = reward
             rewards.append(reward)
 
-            log_step(step, last_action, reward, done, error=None)
-            history.append(f"Step {step}: {last_action} -> reward {reward:.2f}")
+            log_step(step, str(action_dict), reward, done, error=None)
+            history.append(f"Step {step}: {action_dict} -> reward {reward:.2f}")
 
             if done:
                 break
 
-        # compute normalized score
-        max_possible_reward = getattr(env, "max_possible_conversions", 1.0)
+        # Compute normalized score against theoretical max conversions
+        max_possible_reward = getattr(env, "max_possible_conversions", 1.0) or 1.0
         score = sum(rewards) / max_possible_reward
         score = min(max(score, 0.0), 1.0)
         success = score >= SUCCESS_SCORE_THRESHOLD
 
     finally:
         try:
-            await env.close()
+            if hasattr(env, "close"):
+                await env.close()
         except Exception as e:
             print(f"[DEBUG] env.close() error: {e}", flush=True)
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
