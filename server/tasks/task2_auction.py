@@ -5,23 +5,32 @@ from openenv.core.env_server import Environment
 from models import AdPlatformAction, AdPlatformObservation, AdPlatformState
 
 
-# ---------------- RESET Function ----------------
-def reset(state: AdPlatformState) -> AdPlatformObservation:
+# ---------------- RESET ----------------
+def reset(state: AdPlatformState, profile: dict | None = None) -> AdPlatformObservation:
     s = state
+
+    # Apply historical campaign profile (overrides defaults with real data)a
+    s.apply_profile(profile)
+
     s.step_count = 0
-    s.remaining_budget = s.total_budget
+    s.remaining_budget = s.total_budge
     s.total_conversions = 0.0
     s.total_spend = 0.0
+    s.obs_history.clear()
     s.reward_buffer.clear()
 
+    s.conversion_rates = s.base_conversion_rates.copy()
     s.prev_agent_bids = [0.0] * len(s.conversion_rates)
     s.competitor_bids = s.base_competitor_bids.copy()
 
     return AdPlatformObservation(
         step=s.step_count,
         remaining_budget=s.remaining_budget,
-        campaign_performance=s.conversion_rates
+        campaign_performance=s.conversion_rates,
+        competitor_bids=s.competitor_bids,
+        obs_history=[]
     )
+
 
 # ---------------- STEP ----------------
 def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservation:
@@ -34,27 +43,17 @@ def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservat
     assert len(allocations) == len(s.conversion_rates), "Allocation length mismatch"
 
     # ----------------------------
-    # Generate competitor bids (adaptive + seeded variation)
+    # Generate competitor bids using historically-grounded volatility
     # ----------------------------
-    new_competitor_bids = []
-    for i, base_bid in enumerate(s.base_competitor_bids):
-        rng = np.random.default_rng(s.seed + s.step_count + i)
-        # ±10% variation of base
-        variation = rng.uniform(-0.1, 0.1)
-        noisy_base = base_bid * (1 + variation)
-        # Adaptive response to previous agent bid
-        prev_ab = s.prev_agent_bids[i]
-        agent_effect = 1 + s.alpha * (prev_ab / (base_bid + 1e-8) - 1)
-        cb = max(0.01, noisy_base * agent_effect)
-        new_competitor_bids.append(cb)
-
-    s.competitor_bids = new_competitor_bids
+    s.competitor_bids = [
+        s.sample_competitor_bid(i) for i in range(len(s.base_competitor_bids))
+    ]
 
     # ----------------------------
     # Determine pacing limit
     # ----------------------------
     if s.step_count == s.max_steps - 1:
-        pacing_limit = s.remaining_budget  # last step → allow all
+        pacing_limit = s.remaining_budget
     else:
         pacing_limit = s.max_fraction_per_step * s.remaining_budget
 
@@ -62,11 +61,11 @@ def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservat
     # Illegal allocation penalty
     # ----------------------------
     illegal_penalty = 0.0
-    for i, a in enumerate(allocations):
+    for a in allocations:
         if a < 0:
             illegal_penalty += 0.5
         elif a > pacing_limit:
-            illegal_penalty += 0.2  # only penalize overspending early
+            illegal_penalty += 0.2
 
     # ----------------------------
     # Clamp allocations
@@ -76,27 +75,25 @@ def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservat
     # ----------------------------
     # Budget spend
     # ----------------------------
-    spend = sum(allocations)
-    spend = min(spend, s.remaining_budget)
-
-    # Store total available BEFORE spend (important for ratio)
+    spend = min(sum(allocations), s.remaining_budget)
     total_available = s.remaining_budget
-
     s.remaining_budget -= spend
     s.total_spend += spend
 
-    # --- Spend ratio (for carryover penalty) ---
-    if total_available > 0:
-        spend_ratio = spend / (total_available + 1e-8)
-    else:
-        spend_ratio = 0.0
+    spend_ratio = spend / (total_available + 1e-8) if total_available > 0 else 0.0
 
-    # --- Conversions (smooth win probability) ---
+    # ----------------------------
+    # Conversions (smooth win probability + seasonal)
+    # ----------------------------
+    seasonal = s.get_seasonal_multiplier()
     conversions = 0.0
     for a, bid, cb, cr in zip(allocations, bids, s.competitor_bids, s.conversion_rates):
         win_prob = 1 / (1 + np.exp(cb - bid))  # sigmoid
-        conversions += a * cr * win_prob
+        conversions += a * cr * seasonal * win_prob
     s.total_conversions += conversions
+
+    # Record step into rolling history
+    s.record_step(spend=spend, conversions=conversions, allocations=allocations, bids=bids)
 
     # ----------------------------
     # Delayed reward
@@ -108,7 +105,7 @@ def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservat
         delayed_reward = 0.0
 
     # ----------------------------
-    # Spend penalty (legitimate)
+    # Spend penalty
     # ----------------------------
     frac = spend / (s.total_budget + 1e-8)
     penalty = s.penalty_alpha * (frac ** s.penalty_beta)
@@ -117,19 +114,13 @@ def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservat
     # Carryover penalty (early aggressive spending)
     # ----------------------------
     if s.step_count < s.max_steps - 1:
-        time_factor = s.step_count / s.max_steps  # increases over time
+        time_factor = s.step_count / s.max_steps
         carryover_penalty = 0.2 * (spend_ratio ** 2) * (1 - time_factor)
     else:
-        carryover_penalty = 0.0  # last step: no carryover penalty
+        carryover_penalty = 0.0
 
-    # ----------------------------
-    # Total reward
-    # ----------------------------
     reward = delayed_reward - penalty - illegal_penalty - carryover_penalty
 
-    # ----------------------------
-    # Step bookkeeping
-    # ----------------------------
     s.prev_agent_bids = bids.copy()
     s.step_count += 1
     done = s.step_count >= s.max_steps or s.remaining_budget <= 0.0
@@ -139,6 +130,7 @@ def step(state: AdPlatformState, action: AdPlatformAction) -> AdPlatformObservat
         remaining_budget=s.remaining_budget,
         campaign_performance=s.conversion_rates,
         competitor_bids=s.competitor_bids,
+        obs_history=list(s.obs_history),
         reward=reward,
         done=done
     )

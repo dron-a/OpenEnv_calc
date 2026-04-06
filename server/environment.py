@@ -37,20 +37,29 @@ class AdPlatformEnvironment(Environment):
         #     raise ValueError(f"Unknown task: {task}")
 
     # ---------------- RESET ----------------
-    def reset(self, task: Literal["budget", "auction", "multi_campaign"] = None, realism_mode: str | None = None):
+    def reset(self, task: Literal["budget", "auction", "multi_campaign"] = None,
+              realism_mode: str | None = None, profile: dict | None = None):
         """
-        Reset the environment depending on the task
+        Reset the environment depending on the task.
+
+        Args:
+            task:         Switch active task (optional).
+            realism_mode: "fixed" or "realistic" conversion rate mode (budget task only).
+            profile:      CampaignProfile dict with real historical data to inject.
+                          Overrides built-in defaults for conversion_rates,
+                          competitor_bids, bid_volatility, seasonal_multipliers,
+                          market_events, and total_budget.
         """
         s = self._state
         if task is not None:
             self.task = task
 
         if self.task == "budget":
-            return tasks.reset_budget(s, realism_mode)
+            return tasks.reset_budget(s, realism_mode=realism_mode, profile=profile)
         elif self.task == "auction":
-            return tasks.reset_auction(s)
+            return tasks.reset_auction(s, profile=profile)
         elif self.task == "multi_campaign":
-            return tasks.reset_multi_campaign(s)
+            return tasks.reset_multi_campaign(s, profile=profile)
 
 
     # ---------------- STEP ----------------
